@@ -930,4 +930,6 @@ static inline void cgroup_bpf_put(struct cgroup *cgrp) {}
 
 #endif /* CONFIG_CGROUP_BPF */
 
+void record_ctask_latency(u64 latency);
+
 #endif /* _LINUX_CGROUP_H */

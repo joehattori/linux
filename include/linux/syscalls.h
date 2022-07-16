@@ -1057,6 +1057,10 @@ asmlinkage long sys_set_mempolicy_home_node(unsigned long start, unsigned long l
 					    unsigned long home_node,
 					    unsigned long flags);
 
+/* ctask profiling */
+asmlinkage long sys_ctask_start(void);
+asmlinkage long sys_ctask_end(void);
+
 /*
  * Architecture-specific system calls
  */

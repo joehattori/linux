@@ -6782,3 +6782,55 @@ static int __init cgroup_sysfs_init(void)
 subsys_initcall(cgroup_sysfs_init);
 
 #endif /* CONFIG_SYSFS */
+
+static DECLARE_HASHTABLE(ctask_latencies, 5);
+
+struct ctask_latency_info {
+	struct hlist_node node;
+	struct css_set *cgroups;
+
+	u64 average_latency_ns;
+	u64 data_count;
+};
+
+static struct ctask_latency_info *search_cgroup_info(struct css_set *cgroups)
+{
+	unsigned long key = css_set_hash(cgroups->subsys);
+
+	struct ctask_latency_info *cur;
+	hash_for_each_possible (ctask_latencies, cur, node, key) {
+		if (cur->cgroups == cgroups)
+			return cur;
+	}
+	return NULL;
+}
+
+void record_ctask_latency(u64 latency)
+{
+	struct task_struct *p = current;
+	struct css_set *cgroups = p->cgroups;
+	if (!cgroups) {
+		printk("recording ctask latency but current does not belong to a cgroup\n");
+		return;
+	}
+	struct ctask_latency_info *info = search_cgroup_info(cgroups);
+
+	if (info) {
+		int64_t diff =
+			(int64_t)latency - (int64_t)info->average_latency_ns;
+		int64_t new_average = (int64_t)info->average_latency_ns +
+				      diff / ((int64_t)info->data_count + 1);
+		info->average_latency_ns = (u64)new_average;
+		info->data_count++;
+	} else {
+		unsigned long key = css_set_hash(cgroups->subsys);
+		info = (struct ctask_latency_info *)kmalloc(
+			sizeof(struct ctask_latency_info), GFP_KERNEL);
+
+		info->cgroups = cgroups;
+		info->average_latency_ns = latency;
+		info->data_count = 1;
+
+		hash_add(ctask_latencies, &info->node, key);
+	}
+}
