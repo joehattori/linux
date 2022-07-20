@@ -549,6 +549,9 @@ struct sched_entity {
 
 	u64				nr_migrations;
 
+	/* ctask profiling */
+	u64 ctask_start_ns;
+
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	int				depth;
 	struct sched_entity		*parent;
@@ -1498,9 +1501,6 @@ struct task_struct {
 	 */
 	struct callback_head		l1d_flush_kill;
 #endif
-
-	/* ctask profiling */
-	u64 ctask_start_ns;
 
 	/*
 	 * New fields for task_struct should be added above here, so that
