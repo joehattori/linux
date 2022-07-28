@@ -58,7 +58,6 @@
 #include <linux/fs_parser.h>
 #include <linux/sched/cputime.h>
 #include <linux/psi.h>
-#include <linux/sort.h>
 #include <net/sock.h>
 
 #define CREATE_TRACE_POINTS
@@ -6783,69 +6782,3 @@ static int __init cgroup_sysfs_init(void)
 subsys_initcall(cgroup_sysfs_init);
 
 #endif /* CONFIG_SYSFS */
-
-static DECLARE_HASHTABLE(ctask_latencies, 5);
-
-#define MAX_CTASK_LATENCY_ENTRIES 100
-
-struct ctask_latency_info {
-	struct hlist_node node;
-	struct css_set *cgroups;
-
-	u64 latencies[MAX_CTASK_LATENCY_ENTRIES];
-	unsigned entries;
-};
-
-static struct ctask_latency_info *search_ctask_info(struct css_set *cgroups)
-{
-	unsigned long key = css_set_hash(cgroups->subsys);
-
-	struct ctask_latency_info *cur;
-	hash_for_each_possible (ctask_latencies, cur, node, key) {
-		if (cur->cgroups == cgroups)
-			return cur;
-	}
-	return NULL;
-}
-
-static int ctask_latency_cmp(const void *a, const void *b)
-{
-	if (*(const int *)a < *(const int *)b)
-		return -1;
-	if (*(const int *)a > *(const int *)b)
-		return 1;
-	return 0;
-}
-
-void record_ctask_latency(void)
-{
-	u64 now, latency;
-	unsigned long key;
-	struct ctask_latency_info *info;
-	struct task_struct *p = current;
-	struct css_set *cgroups = p->cgroups;
-	if (!cgroups) {
-		printk("recording ctask latency but current does not belong to a cgroup\n");
-		return;
-	}
-	now = ktime_get_real_fast_ns();
-	info = search_ctask_info(cgroups);
-	latency = now - p->se.ctask_start_ns;
-
-	if (info) {
-		if (info->entries >= MAX_CTASK_LATENCY_ENTRIES)
-			return;
-		info->latencies[info->entries++] = latency;
-		sort((void *)info->latencies, info->entries, sizeof(u64),
-		     &ctask_latency_cmp, NULL);
-	} else {
-		key = css_set_hash(cgroups->subsys);
-		info = (struct ctask_latency_info *)kmalloc(
-			sizeof(struct ctask_latency_info), GFP_KERNEL);
-		info->cgroups = cgroups;
-		info->entries = 1;
-		info->latencies[0] = latency;
-
-		hash_add(ctask_latencies, &info->node, key);
-	}
-}

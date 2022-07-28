@@ -1,16 +1,12 @@
-#include <linux/kernel.h>
-#include <linux/ktime.h>
-#include <linux/cgroup.h>
+#include <linux/sched.h>
+#include <linux/syscalls.h>
 
-asmlinkage long __x64_sys_ctask_start(void)
+SYSCALL_DEFINE0(ctask_start)
 {
-	struct task_struct *p = current;
-	p->se.ctask_start_ns = ktime_get_real_fast_ns();
-	return 0;
+	return ctask_start();
 }
 
-asmlinkage long __x64_sys_ctask_end(void)
+SYSCALL_DEFINE1(ctask_end, unsigned int, ctask_id)
 {
-	record_ctask_latency();
-	return 0;
+	return ctask_end(ctask_id);
 }

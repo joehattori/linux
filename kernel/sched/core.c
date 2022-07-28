@@ -33,6 +33,8 @@
 #include <linux/sched/nohz.h>
 #include <linux/sched/rseq_api.h>
 #include <linux/sched/rt.h>
+#include <linux/hashtable.h>
+#include <linux/sort.h>
 
 #include <linux/blkdev.h>
 #include <linux/context_tracking.h>
@@ -6224,6 +6226,167 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 # define SM_MASK_PREEMPT	SM_PREEMPT
 #endif
 
+DEFINE_MUTEX(ctask_latencies_mu);
+static DECLARE_HASHTABLE(ctask_latencies, 5);
+
+#define MAX_CTASK_LATENCY_ENTRIES 100
+
+struct ctask {
+	struct rb_node node;
+	unsigned int id;
+	u64 start_ns;
+};
+
+struct ctask_latency_info {
+	struct hlist_node node;
+	struct css_set *cgroups;
+
+	/* ctaskTODO: mutex */
+	u64 *latencies;
+	u64 default_cpu_shares;
+	unsigned entries;
+
+	struct mutex ctasks_mu;
+
+	struct rb_root active_ctasks;
+	atomic_t next_ctask_id_hint;
+};
+
+static inline struct ctask *ctask_find_locked(struct ctask_latency_info *info,
+					      unsigned int ctask_id)
+{
+	struct rb_root *root = &info->active_ctasks;
+	struct rb_node *node = root->rb_node;
+
+	while (node) {
+		struct ctask *cur = container_of(node, struct ctask, node);
+		unsigned int cur_id = cur->id;
+
+		if (ctask_id < cur_id)
+			node = node->rb_left;
+		else if (ctask_id > cur_id)
+			node = node->rb_right;
+		else
+			return cur;
+	}
+	return NULL;
+}
+
+static inline void ctask_add_locked(struct ctask_latency_info *info,
+				    struct ctask *ctsk)
+{
+	struct rb_root *root = &info->active_ctasks;
+	struct rb_node **new = &root->rb_node, *parent = NULL;
+
+	/* Figure out where to put new node */
+	while (*new) {
+		struct ctask *cur = container_of(*new, struct ctask, node);
+		unsigned int cur_id = cur->id;
+
+		parent = *new;
+		if (ctsk->id < cur_id)
+			new = &(*new)->rb_left;
+		else if (ctsk->id > cur_id)
+			new = &(*new)->rb_right;
+		else {
+			printk(KERN_ERR "ctask_add_locked: DUPLICATION (%d)\n",
+			       ctsk->id);
+			return;
+		}
+	}
+
+	/* Add new node and rebalance tree. */
+	rb_link_node(&ctsk->node, parent, new);
+	rb_insert_color(&ctsk->node, root);
+}
+
+static inline void ctask_delete_locked(struct ctask_latency_info *info,
+				       struct ctask *ctsk)
+{
+	rb_erase(&ctsk->node, &info->active_ctasks);
+	kfree(ctsk);
+}
+
+static void dbg_list_active_ctasks(struct ctask_latency_info *info)
+{
+	struct rb_root *active_ctasks = &info->active_ctasks;
+	struct rb_node *node;
+
+	printk("start listing active_ctasks @@@@@@@@@@@@@@@\n");
+
+	for (node = rb_first(active_ctasks); node; node = rb_next(node)) {
+		struct ctask *cur = container_of(node, struct ctask, node);
+		printk("ctask_id %d\n", cur->id);
+	}
+	printk("stop listing active_ctasks @@@@@@@@@@@@@@@\n");
+}
+
+static void ctask_setup(struct ctask_latency_info *info, struct ctask *ctsk)
+{
+	unsigned int ctask_id;
+
+	mutex_lock(&info->ctasks_mu);
+	ctask_id = atomic_read(&info->next_ctask_id_hint);
+
+	while (ctask_find_locked(info, ctask_id)) {
+		if (ctask_id < INT_MAX)
+			ctask_id++;
+		else
+			ctask_id = 0;
+	}
+
+	if (ctask_id < INT_MAX)
+		atomic_set(&info->next_ctask_id_hint, ctask_id + 1);
+	else
+		atomic_set(&info->next_ctask_id_hint, 0);
+
+	ctsk->id = ctask_id;
+	ctask_add_locked(info, ctsk);
+	mutex_unlock(&info->ctasks_mu);
+}
+
+static unsigned long cgroups_hash(struct css_set *cgroups)
+{
+	return (unsigned long)cgroups;
+}
+
+static struct ctask_latency_info *search_ctask_info(struct css_set *cgroups)
+{
+	unsigned long key = cgroups_hash(cgroups);
+
+	struct ctask_latency_info *cur;
+	hash_for_each_possible (ctask_latencies, cur, node, key) {
+		if (cur->cgroups == cgroups)
+			return cur;
+	}
+	return NULL;
+}
+
+static bool is_ctask_active(struct task_struct *p)
+{
+	struct css_set *cgroups = p->cgroups;
+	struct ctask_latency_info *info;
+	if (!cgroups)
+		return false;
+	info = search_ctask_info(cgroups);
+	if (!info)
+		return false;
+	return !RB_EMPTY_ROOT(&info->active_ctasks);
+}
+
+static bool ctask_enough_data(struct task_struct *p)
+{
+	struct css_set *cgroups = p->cgroups;
+	struct ctask_latency_info *info;
+	if (!cgroups)
+		return false;
+	info = search_ctask_info(cgroups);
+	/* ctaskTODO */
+	return info ? info->entries >= 100 : false;
+}
+
+static int adjust_ctask_cpu_shares(struct task_struct *p);
+
 /*
  * __schedule() is the main scheduler function.
  *
@@ -6453,6 +6616,12 @@ static void sched_update_worker(struct task_struct *tsk)
 asmlinkage __visible void __sched schedule(void)
 {
 	struct task_struct *tsk = current;
+
+	if (is_ctask_active(tsk) && ctask_enough_data(tsk)) {
+		if (adjust_ctask_cpu_shares(tsk) < 0) {
+			printk("ctask: failed to adjust cpu.shares\n");
+		}
+	}
 
 	sched_submit_work(tsk);
 	do {
@@ -11078,4 +11247,175 @@ const u32 sched_prio_to_wmult[40] = {
 void call_trace_sched_update_nr_running(struct rq *rq, int count)
 {
         trace_sched_update_nr_running_tp(rq, count);
+}
+
+/* ctask */
+
+static int ctask_latency_cmp(const void *a, const void *b)
+{
+	const int ai = *(const int *)a, bi = *(const int *)b;
+	if (ai < bi)
+		return -1;
+	if (ai > bi)
+		return 1;
+	return 0;
+}
+
+long ctask_start(void)
+{
+	struct task_struct *p = current;
+	struct css_set *cgroups = p->cgroups;
+	struct ctask_latency_info *info;
+	struct ctask *ctsk;
+
+	if (!cgroups) {
+		printk("ctask_start(2) called by a process without cgroup\n");
+		return -EINVAL;
+	}
+
+	ctsk = (struct ctask *)kmalloc(sizeof(struct ctask), GFP_KERNEL);
+	ctsk->start_ns = ktime_get_real_fast_ns();
+
+	info = search_ctask_info(cgroups);
+
+	if (!info) {
+		DEFINE_MUTEX(mu);
+		atomic_t hint = ATOMIC_INIT(0);
+
+		info = (struct ctask_latency_info *)kmalloc(
+			sizeof(struct ctask_latency_info), GFP_KERNEL);
+		info->cgroups = cgroups;
+		info->latencies =
+			(u64 *)vmalloc(sizeof(u64) * MAX_CTASK_LATENCY_ENTRIES);
+		info->entries = 0;
+		info->default_cpu_shares =
+			cpu_shares_read_u64(cgroups->subsys[cpu_cgrp_id], NULL);
+		info->active_ctasks = RB_ROOT;
+		info->ctasks_mu = mu;
+		info->next_ctask_id_hint = hint;
+
+		/* ctaskTODO: lock? */
+		mutex_lock(&ctask_latencies_mu);
+		hash_add(ctask_latencies, &info->node, cgroups_hash(cgroups));
+		mutex_unlock(&ctask_latencies_mu);
+	}
+
+	ctask_setup(info, ctsk);
+	return ctsk->id;
+}
+
+static void record_ctask_latency(struct ctask_latency_info *info,
+				 u64 ctask_start_ns)
+{
+	u64 now = ktime_get_real_fast_ns();
+
+	if (info->entries >= MAX_CTASK_LATENCY_ENTRIES)
+		return;
+
+	info->latencies[info->entries++] = now - ctask_start_ns;
+	sort((void *)info->latencies, info->entries, sizeof(u64),
+	     &ctask_latency_cmp, NULL);
+	return;
+}
+
+long ctask_end(unsigned int ctask_id)
+{
+	struct task_struct *p = current;
+	struct css_set *cgroups = p->cgroups;
+	struct ctask_latency_info *info;
+	struct ctask *ctsk;
+
+	if (!cgroups) {
+		printk("ctask_end(2) called by a process without cgroup\n");
+		return -EINVAL;
+	}
+
+	/* ctask: reset boost rate */
+	info = search_ctask_info(cgroups);
+	if (!info) {
+		printk("invalid cgroup in ctask_end\n");
+		return -EINVAL;
+	}
+
+	mutex_lock(&info->ctasks_mu);
+	ctsk = ctask_find_locked(info, ctask_id);
+	mutex_unlock(&info->ctasks_mu);
+	if (!ctsk) {
+		// printk("ctask %d has not called ctask_start(2)\n", ctask_id);
+		return -EINVAL;
+	}
+
+	record_ctask_latency(info, ctsk->start_ns);
+	mutex_lock(&info->ctasks_mu);
+	ctask_delete_locked(info, ctsk);
+	mutex_unlock(&info->ctasks_mu);
+
+	// printk("ctask_end(2) called on %d\n", ctask_id);
+
+	return cpu_shares_write_u64(cgroups->subsys[cpu_cgrp_id], NULL,
+				    info->default_cpu_shares);
+}
+
+static unsigned cpu_shares_boost_rate(struct css_set *cgroups, u64 cur_latency)
+{
+	struct ctask_latency_info *info = search_ctask_info(cgroups);
+	if (!info) {
+		printk("invalid cgroup in ctask_get_nth_percentile_latency\n");
+		return 1;
+	}
+
+	/* 90 percentile */
+	if (cur_latency >= info->latencies[info->entries * 90 / 100])
+		return 8;
+
+	/* 70 percentile */
+	if (cur_latency >= info->latencies[info->entries * 70 / 100])
+		return 4;
+
+	/* 50 percentile */
+	if (cur_latency >= info->latencies[info->entries * 50 / 100])
+		return 2;
+
+	return 1;
+}
+
+static u64 earliest_ctask_start_ns(struct ctask_latency_info *info)
+{
+	struct rb_root *active_ctasks;
+	struct rb_node *node;
+	u64 ret;
+
+	active_ctasks = &(info->active_ctasks);
+	ret = U64_MAX;
+	for (node = rb_first(active_ctasks); node; node = rb_next(node))
+		ret = min(ret, rb_entry(node, struct ctask, node)->start_ns);
+
+	return ret;
+}
+
+static int adjust_ctask_cpu_shares(struct task_struct *p)
+{
+	return 0;
+	// struct css_set *cgroups = p->cgroups;
+	// u64 earliest_start, boost;
+	// struct ctask_latency_info *info = search_ctask_info(cgroups);
+
+	// if (!info) {
+	//     printk("invalid cgroup in adjust_ctask_cpu_shares\n");
+	//     return -EINVAL;
+	// }
+
+	// earliest_start = earliest_ctask_start_ns(info);
+
+	// if (earliest_start == U64_MAX) {
+	//     printk("all ctasks startted after U64_MAX??\n");
+	//     return -1;
+	// }
+
+	// boost = (u64)cpu_shares_boost_rate(cgroups, ktime_get_real_fast_ns() - earliest_start);
+	// if (boost == 1)
+	//     return 0;
+
+	// // printk("ctask boosted cpu.shares to %llu\n", info->default_cpu_shares * boost);
+	// return cpu_shares_write_u64(cgroups->subsys[cpu_cgrp_id], NULL, info->default_cpu_shares * boost);
 }

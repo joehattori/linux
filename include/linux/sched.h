@@ -549,9 +549,6 @@ struct sched_entity {
 
 	u64				nr_migrations;
 
-	/* ctask profiling */
-	u64 ctask_start_ns;
-
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	int				depth;
 	struct sched_entity		*parent;
@@ -2364,5 +2361,9 @@ extern int sched_core_share_pid(unsigned int cmd, pid_t pid, enum pid_type type,
 static inline void sched_core_free(struct task_struct *tsk) { }
 static inline void sched_core_fork(struct task_struct *p) { }
 #endif
+
+/* ctask */
+extern long ctask_start(void);
+extern long ctask_end(unsigned int ctask_id);
 
 #endif
