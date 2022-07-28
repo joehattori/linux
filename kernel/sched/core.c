@@ -6307,20 +6307,6 @@ static inline void ctask_delete_locked(struct ctask_latency_info *info,
 	kfree(ctsk);
 }
 
-static void dbg_list_active_ctasks(struct ctask_latency_info *info)
-{
-	struct rb_root *active_ctasks = &info->active_ctasks;
-	struct rb_node *node;
-
-	printk("start listing active_ctasks @@@@@@@@@@@@@@@\n");
-
-	for (node = rb_first(active_ctasks); node; node = rb_next(node)) {
-		struct ctask *cur = container_of(node, struct ctask, node);
-		printk("ctask_id %d\n", cur->id);
-	}
-	printk("stop listing active_ctasks @@@@@@@@@@@@@@@\n");
-}
-
 static void ctask_setup(struct ctask_latency_info *info, struct ctask *ctsk)
 {
 	unsigned int ctask_id;
@@ -6617,12 +6603,6 @@ asmlinkage __visible void __sched schedule(void)
 {
 	struct task_struct *tsk = current;
 
-	if (is_ctask_active(tsk) && ctask_enough_data(tsk)) {
-		if (adjust_ctask_cpu_shares(tsk) < 0) {
-			printk("ctask: failed to adjust cpu.shares\n");
-		}
-	}
-
 	sched_submit_work(tsk);
 	do {
 		preempt_disable();
@@ -6630,6 +6610,12 @@ asmlinkage __visible void __sched schedule(void)
 		sched_preempt_enable_no_resched();
 	} while (need_resched());
 	sched_update_worker(tsk);
+
+	if (is_ctask_active(tsk) && ctask_enough_data(tsk)) {
+		if (adjust_ctask_cpu_shares(tsk) < 0) {
+			printk("ctask: failed to adjust cpu.shares\n");
+		}
+	}
 }
 EXPORT_SYMBOL(schedule);
 
@@ -11381,12 +11367,9 @@ static unsigned cpu_shares_boost_rate(struct css_set *cgroups, u64 cur_latency)
 
 static u64 earliest_ctask_start_ns(struct ctask_latency_info *info)
 {
-	struct rb_root *active_ctasks;
+	struct rb_root *active_ctasks = &info->active_ctasks;
 	struct rb_node *node;
-	u64 ret;
-
-	active_ctasks = &(info->active_ctasks);
-	ret = U64_MAX;
+	u64 ret = U64_MAX;
 	for (node = rb_first(active_ctasks); node; node = rb_next(node))
 		ret = min(ret, rb_entry(node, struct ctask, node)->start_ns);
 
@@ -11395,27 +11378,23 @@ static u64 earliest_ctask_start_ns(struct ctask_latency_info *info)
 
 static int adjust_ctask_cpu_shares(struct task_struct *p)
 {
-	return 0;
-	// struct css_set *cgroups = p->cgroups;
-	// u64 earliest_start, boost;
-	// struct ctask_latency_info *info = search_ctask_info(cgroups);
+	struct css_set *cgroups = p->cgroups;
+	u64 earliest_start, boost;
+	struct ctask_latency_info *info = search_ctask_info(cgroups);
 
-	// if (!info) {
-	//     printk("invalid cgroup in adjust_ctask_cpu_shares\n");
-	//     return -EINVAL;
-	// }
+	if (!info) {
+		printk("invalid cgroup in adjust_ctask_cpu_shares\n");
+		return -EINVAL;
+	}
 
-	// earliest_start = earliest_ctask_start_ns(info);
+	earliest_start = earliest_ctask_start_ns(info);
 
-	// if (earliest_start == U64_MAX) {
-	//     printk("all ctasks startted after U64_MAX??\n");
-	//     return -1;
-	// }
+	if (earliest_start == U64_MAX)
+		return 0;
 
-	// boost = (u64)cpu_shares_boost_rate(cgroups, ktime_get_real_fast_ns() - earliest_start);
-	// if (boost == 1)
-	//     return 0;
+	boost = (u64)cpu_shares_boost_rate(cgroups, ktime_get_real_fast_ns() -
+							    earliest_start);
 
-	// // printk("ctask boosted cpu.shares to %llu\n", info->default_cpu_shares * boost);
-	// return cpu_shares_write_u64(cgroups->subsys[cpu_cgrp_id], NULL, info->default_cpu_shares * boost);
+	return cpu_shares_write_u64(cgroups->subsys[cpu_cgrp_id], NULL,
+				    info->default_cpu_shares * boost);
 }
