@@ -2310,3 +2310,6 @@ static inline void sched_core_fork(struct task_struct *p) { }
 #endif
 
 #endif
+
+extern u8 group_sched_policy(struct seq_file *s);
+extern void set_group_sched_policy(struct seq_file *s, u8 policy);

@@ -385,6 +385,11 @@ struct cfs_bandwidth {
 #endif
 };
 
+struct group_rq {
+	struct rt_rq *rt_rq;
+	u8 policy;
+};
+
 /* Task group related information */
 struct task_group {
 	struct cgroup_subsys_state css;
@@ -438,6 +443,7 @@ struct task_group {
 	struct uclamp_se	uclamp[UCLAMP_CNT];
 #endif
 
+	struct group_rq *grq;
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -3064,3 +3070,4 @@ extern int sched_dynamic_mode(const char *str);
 extern void sched_dynamic_update(int mode);
 #endif
 
+extern void free_group_sched(struct task_group *tg);
