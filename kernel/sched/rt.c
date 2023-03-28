@@ -318,11 +318,16 @@ static void update_rt_migration(struct rt_rq *rt_rq)
 static void inc_rt_migration(struct sched_rt_entity *rt_se, struct rt_rq *rt_rq)
 {
 	struct task_struct *p;
+	struct rq *rq;
 
 	if (!rt_entity_is_task(rt_se))
 		return;
 
 	p = rt_task_of(rt_se);
+	rq = rq_of_rt_rq(rt_rq);
+	/* if rq is NULL, it means rt_rq is struct cgsched */
+	if (!rq)
+		return;
 	rt_rq = &rq_of_rt_rq(rt_rq)->rt;
 
 	rt_rq->rt_nr_total++;
@@ -349,11 +354,6 @@ static void dec_rt_migration(struct sched_rt_entity *rt_se, struct rt_rq *rt_rq)
 	update_rt_migration(rt_rq);
 }
 
-static inline int has_pushable_tasks(struct rq *rq)
-{
-	return !plist_head_empty(&rq->rt.pushable_tasks);
-}
-
 static DEFINE_PER_CPU(struct callback_head, rt_push_head);
 static DEFINE_PER_CPU(struct callback_head, rt_pull_head);
 
@@ -362,7 +362,7 @@ static void pull_rt_task(struct rq *);
 
 static inline void rt_queue_push_tasks(struct rq *rq)
 {
-	if (!has_pushable_tasks(rq))
+	if (!has_pushable_tasks(&rq->rt))
 		return;
 
 	queue_balance_callback(rq, &per_cpu(rt_push_head, rq->cpu), push_rt_tasks);
@@ -373,38 +373,38 @@ static inline void rt_queue_pull_task(struct rq *rq)
 	queue_balance_callback(rq, &per_cpu(rt_pull_head, rq->cpu), pull_rt_task);
 }
 
-static void enqueue_pushable_task(struct rq *rq, struct task_struct *p)
+void enqueue_pushable_task(struct rt_rq *rt, struct task_struct *p)
 {
-	plist_del(&p->pushable_tasks, &rq->rt.pushable_tasks);
+	plist_del(&p->pushable_tasks, &rt->pushable_tasks);
 	plist_node_init(&p->pushable_tasks, p->prio);
-	plist_add(&p->pushable_tasks, &rq->rt.pushable_tasks);
+	plist_add(&p->pushable_tasks, &rt->pushable_tasks);
 
 	/* Update the highest prio pushable task */
-	if (p->prio < rq->rt.highest_prio.next)
-		rq->rt.highest_prio.next = p->prio;
+	if (p->prio < rt->highest_prio.next)
+		rt->highest_prio.next = p->prio;
 }
 
-static void dequeue_pushable_task(struct rq *rq, struct task_struct *p)
+void dequeue_pushable_task(struct rt_rq *rt, struct task_struct *p)
 {
-	plist_del(&p->pushable_tasks, &rq->rt.pushable_tasks);
+	plist_del(&p->pushable_tasks, &rt->pushable_tasks);
 
 	/* Update the new highest prio pushable task */
-	if (has_pushable_tasks(rq)) {
-		p = plist_first_entry(&rq->rt.pushable_tasks,
-				      struct task_struct, pushable_tasks);
-		rq->rt.highest_prio.next = p->prio;
+	if (has_pushable_tasks(rt)) {
+		p = plist_first_entry(&rt->pushable_tasks, struct task_struct,
+				      pushable_tasks);
+		rt->highest_prio.next = p->prio;
 	} else {
-		rq->rt.highest_prio.next = MAX_RT_PRIO-1;
+		rt->highest_prio.next = MAX_RT_PRIO - 1;
 	}
 }
 
 #else
 
-static inline void enqueue_pushable_task(struct rq *rq, struct task_struct *p)
+void enqueue_pushable_task(struct rt_rq *rt, struct task_struct *p)
 {
 }
 
-static inline void dequeue_pushable_task(struct rq *rq, struct task_struct *p)
+void dequeue_pushable_task(struct rt_rq *rt, struct task_struct *p)
 {
 }
 
@@ -994,7 +994,7 @@ static int sched_rt_runtime_exceeded(struct rt_rq *rt_rq)
  * Update the current task's runtime statistics. Skip current tasks that
  * are not in our scheduling class.
  */
-static void update_curr_rt(struct rq *rq)
+void update_curr_rt(struct rq *rq)
 {
 	struct task_struct *curr = rq->curr;
 	struct sched_rt_entity *rt_se = &curr->rt;
@@ -1379,7 +1379,7 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 	enqueue_rt_entity(rt_se, flags);
 
 	if (!task_current(rq, p) && p->nr_cpus_allowed > 1)
-		enqueue_pushable_task(rq, p);
+		enqueue_pushable_task(&rq->rt, p);
 }
 
 static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
@@ -1389,7 +1389,7 @@ static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 	update_curr_rt(rq);
 	dequeue_rt_entity(rt_se, flags);
 
-	dequeue_pushable_task(rq, p);
+	dequeue_pushable_task(&rq->rt, p);
 }
 
 /*
@@ -1579,7 +1579,7 @@ static inline void set_next_task_rt(struct rq *rq, struct task_struct *p, bool f
 	p->se.exec_start = rq_clock_task(rq);
 
 	/* The running task is never eligible for pushing */
-	dequeue_pushable_task(rq, p);
+	dequeue_pushable_task(&rq->rt, p);
 
 	if (!first)
 		return;
@@ -1595,8 +1595,7 @@ static inline void set_next_task_rt(struct rq *rq, struct task_struct *p, bool f
 	rt_queue_push_tasks(rq);
 }
 
-static struct sched_rt_entity *pick_next_rt_entity(struct rq *rq,
-						   struct rt_rq *rt_rq)
+static struct sched_rt_entity *pick_next_rt_entity(struct rt_rq *rt_rq)
 {
 	struct rt_prio_array *array = &rt_rq->active;
 	struct sched_rt_entity *next = NULL;
@@ -1612,13 +1611,12 @@ static struct sched_rt_entity *pick_next_rt_entity(struct rq *rq,
 	return next;
 }
 
-static struct task_struct *_pick_next_task_rt(struct rq *rq)
+struct task_struct *_pick_next_task_rt(struct rt_rq *rt_rq)
 {
 	struct sched_rt_entity *rt_se;
-	struct rt_rq *rt_rq  = &rq->rt;
 
 	do {
-		rt_se = pick_next_rt_entity(rq, rt_rq);
+		rt_se = pick_next_rt_entity(rt_rq);
 		BUG_ON(!rt_se);
 		rt_rq = group_rt_rq(rt_se);
 	} while (rt_rq);
@@ -1633,7 +1631,7 @@ static struct task_struct *pick_task_rt(struct rq *rq)
 	if (!sched_rt_runnable(rq))
 		return NULL;
 
-	p = _pick_next_task_rt(rq);
+	p = _pick_next_task_rt(&rq->rt);
 
 	return p;
 }
@@ -1659,7 +1657,7 @@ static void put_prev_task_rt(struct rq *rq, struct task_struct *p)
 	 * if it is still active
 	 */
 	if (on_rt_rq(&p->rt) && p->nr_cpus_allowed > 1)
-		enqueue_pushable_task(rq, p);
+		enqueue_pushable_task(&rq->rt, p);
 }
 
 #ifdef CONFIG_SMP
@@ -1685,7 +1683,7 @@ static struct task_struct *pick_highest_pushable_task(struct rq *rq, int cpu)
 	struct plist_head *head = &rq->rt.pushable_tasks;
 	struct task_struct *p;
 
-	if (!has_pushable_tasks(rq))
+	if (!has_pushable_tasks(&rq->rt))
 		return NULL;
 
 	plist_for_each_entry(p, head, pushable_tasks) {
@@ -1850,7 +1848,7 @@ static struct task_struct *pick_next_pushable_task(struct rq *rq)
 {
 	struct task_struct *p;
 
-	if (!has_pushable_tasks(rq))
+	if (!has_pushable_tasks(&rq->rt))
 		return NULL;
 
 	p = plist_first_entry(&rq->rt.pushable_tasks,
@@ -2131,7 +2129,7 @@ void rto_push_irq_work_func(struct irq_work *work)
 	 * We do not need to grab the lock to check for has_pushable_tasks.
 	 * When it gets updated, a check is made if a push is possible.
 	 */
-	if (has_pushable_tasks(rq)) {
+	if (has_pushable_tasks(&rq->rt)) {
 		raw_spin_rq_lock(rq);
 		while (push_rt_task(rq, true))
 			;

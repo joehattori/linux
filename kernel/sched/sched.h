@@ -385,11 +385,6 @@ struct cfs_bandwidth {
 #endif
 };
 
-struct group_rq {
-	struct rt_rq *rt_rq;
-	u8 policy;
-};
-
 /* Task group related information */
 struct task_group {
 	struct cgroup_subsys_state css;
@@ -443,7 +438,7 @@ struct task_group {
 	struct uclamp_se	uclamp[UCLAMP_CNT];
 #endif
 
-	struct group_rq *grq;
+  unsigned int cgsched_policy;
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -740,6 +735,7 @@ struct dl_rq {
 #ifdef CONFIG_FAIR_GROUP_SCHED
 /* An entity is a task if it doesn't "own" a runqueue */
 #define entity_is_task(se)	(!se->my_q)
+#define entity_is_cgsched(se)	(se->cgsched_policy)
 
 static inline void se_update_runnable(struct sched_entity *se)
 {
@@ -3070,4 +3066,16 @@ extern int sched_dynamic_mode(const char *str);
 extern void sched_dynamic_update(int mode);
 #endif
 
-extern void free_group_sched(struct task_group *tg);
+extern struct task_struct *_pick_next_task_rt(struct rt_rq *rt_rq);
+extern void print_tasks(struct cfs_rq *cfs);
+extern int debug;
+inline struct task_group *css_tg(struct cgroup_subsys_state *css);
+
+static inline int has_pushable_tasks(struct rt_rq *rt)
+{
+	return !plist_head_empty(&rt->pushable_tasks);
+}
+
+void enqueue_pushable_task(struct rt_rq *rt, struct task_struct *p);
+void dequeue_pushable_task(struct rt_rq *rt, struct task_struct *p);
+void update_curr_rt(struct rq *rq);

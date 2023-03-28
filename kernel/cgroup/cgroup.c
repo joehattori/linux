@@ -4919,39 +4919,6 @@ static ssize_t cgroup_threads_write(struct kernfs_open_file *of,
 	return __cgroup_procs_write(of, buf, false) ?: nbytes;
 }
 
-static int cgroup_sched_show(struct seq_file *s, void *v)
-{
-	u8 policy = group_sched_policy(s);
-	switch (policy) {
-	case SCHED_RR:
-		seq_printf(s, "SCHED_RR\n");
-		break;
-	case SCHED_FIFO:
-		seq_printf(s, "SCHED_FIFO\n");
-		break;
-	default:
-		seq_printf(s, "cgroup scheduling policy not set\n");
-	}
-	return 0;
-}
-
-static ssize_t cgroup_sched_write(struct kernfs_open_file *of, char *buf,
-				  size_t nbytes, loff_t off)
-{
-	int policy = -1;
-
-	if (!strncmp(buf, "SCHED_RR", nbytes - 1)) {
-		policy = SCHED_RR;
-	} else if (!strncmp(buf, "SCHED_FIFO", nbytes - 1)) {
-		policy = SCHED_FIFO;
-	}
-	if (policy < 0) {
-		return -EINVAL;
-	}
-	set_group_sched_policy(of->seq_file, (u8)policy);
-	return nbytes;
-}
-
 /* cgroup core interface files for the default hierarchy */
 static struct cftype cgroup_base_files[] = {
 	{
@@ -5023,12 +4990,6 @@ static struct cftype cgroup_base_files[] = {
 	{
 		.name = "cpu.stat",
 		.seq_show = cpu_stat_show,
-	},
-	{
-		.name = "cgroup.sched",
-		.flags = CFTYPE_NS_DELEGATABLE,
-		.seq_show = cgroup_sched_show,
-		.write = cgroup_sched_write,
 	},
 #ifdef CONFIG_PSI
 	{

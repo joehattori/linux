@@ -9712,7 +9712,6 @@ static void sched_free_group(struct task_group *tg)
 {
 	free_fair_sched_group(tg);
 	free_rt_sched_group(tg);
-	free_group_sched(tg);
 	autogroup_free(tg);
 	kmem_cache_free(task_group_cache, tg);
 }
@@ -9849,7 +9848,7 @@ void sched_move_task(struct task_struct *tsk)
 	task_rq_unlock(rq, tsk, &rf);
 }
 
-static inline struct task_group *css_tg(struct cgroup_subsys_state *css)
+inline struct task_group *css_tg(struct cgroup_subsys_state *css)
 {
 	return css ? container_of(css, struct task_group, css) : NULL;
 }
@@ -10724,6 +10723,67 @@ static ssize_t cpu_max_write(struct kernfs_open_file *of,
 }
 #endif
 
+static int cgsched_show(struct seq_file *s, void *v)
+{
+	int policy = css_tg(seq_css(s))->cgsched_policy;
+
+	switch (policy) {
+	case SCHED_RR:
+		seq_printf(s, "Round Robin\n");
+		break;
+	case SCHED_FIFO:
+		seq_printf(s, "FIFO\n");
+		break;
+	default:
+		seq_printf(s, "cgroup scheduling policy is not set\n");
+	}
+	return 0;
+}
+
+static inline void setup_cgsched_tg(struct task_group *tg, unsigned policy) {
+	int i;
+
+	tg->cgsched_policy = policy;
+	for_each_possible_cpu (i) {
+		struct sched_entity *se = tg->se[i];
+		se->cgsched_rq = tg->rt_rq[i];
+		se->cgsched_policy = policy;
+		INIT_LIST_HEAD(&se->group_node);
+	}
+}
+
+static ssize_t cgsched_write(struct kernfs_open_file *of, char *buf,
+				  size_t nbytes, loff_t off)
+{
+	struct css_task_iter it;
+	struct task_struct *task;
+	struct cgroup_subsys_state *css = seq_css(of->seq_file);
+	struct task_group *tg = NULL;
+	unsigned int policy;
+
+	if (!strncmp(buf, "rr", nbytes - 1))
+		policy = SCHED_RR;
+	else if (!strncmp(buf, "fifo", nbytes - 1))
+		policy = SCHED_FIFO;
+	else
+		return -EINVAL;
+
+	css_task_iter_start(css, CSS_TASK_ITER_THREADED, &it);
+	while ((task = css_task_iter_next(&it))) {
+		// TODO(hattori): change scheduling class
+		if (tg)
+			BUG_ON(tg != task->sched_task_group);
+		else {
+			tg = task->sched_task_group;
+			setup_cgsched_tg(tg, policy);
+		}
+		sched_move_task(task);
+	}
+	css_task_iter_end(&it);
+
+	return nbytes;
+}
+
 static struct cftype cpu_files[] = {
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	{
@@ -10773,6 +10833,12 @@ static struct cftype cpu_files[] = {
 		.write = cpu_uclamp_max_write,
 	},
 #endif
+	{
+		.name = "policy",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.seq_show = cgsched_show,
+		.write = cgsched_write,
+	},
 	{ }	/* terminate */
 };
 
