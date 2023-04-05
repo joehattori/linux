@@ -437,8 +437,6 @@ struct task_group {
 	/* Effective clamp values used for a task group */
 	struct uclamp_se	uclamp[UCLAMP_CNT];
 #endif
-
-  unsigned int cgsched_policy;
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -3068,8 +3066,6 @@ extern void sched_dynamic_update(int mode);
 
 extern struct task_struct *_pick_next_task_rt(struct rt_rq *rt_rq);
 extern void print_tasks(struct cfs_rq *cfs);
-extern int debug;
-inline struct task_group *css_tg(struct cgroup_subsys_state *css);
 
 static inline int has_pushable_tasks(struct rt_rq *rt)
 {

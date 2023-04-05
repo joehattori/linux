@@ -5636,8 +5636,14 @@ static int sched_idle_cpu(int cpu)
 }
 #endif
 
-static inline bool is_cgsched_task(struct task_group *tg) {
-	return tg->cgsched_policy;
+static inline bool is_cgsched_task(const struct task_struct *task)
+{
+	switch (task->policy) {
+	case SCHED_CGSCHED_RR:
+	case SCHED_CGSCHED_FIFO:
+		return true;
+	}
+	return false;
 }
 
 static void enqueue_cgsched(struct task_struct *p, int cpu, int flags) {
@@ -5675,7 +5681,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct sched_entity *se = &p->se;
 	int idle_h_nr_running = task_has_idle_policy(p);
 	int task_new = !(flags & ENQUEUE_WAKEUP);
-	bool is_first_loop = true;
+	bool is_cgsched = is_cgsched_task(p);
 
 	/*
 	 * The code below (indirectly) updates schedutil which looks at
@@ -5694,8 +5700,9 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
 	for_each_sched_entity(se) {
-		if (is_cgsched_task(p->sched_task_group) && is_first_loop) {
+		if (is_cgsched) {
 			enqueue_cgsched(p, cpu_of(rq), flags);
+			is_cgsched = false;
 		} else {
 			if (se->on_rq)
 				break;
@@ -5714,7 +5721,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 			flags = ENQUEUE_WAKEUP;
 		}
-		is_first_loop = false;
 	}
 
 	for_each_sched_entity(se) {
@@ -5818,17 +5824,19 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int task_sleep = flags & DEQUEUE_SLEEP;
 	int idle_h_nr_running = task_has_idle_policy(p);
 	bool was_sched_idle = sched_idle_rq(rq);
+	bool is_cgsched = is_cgsched_task(p) && p->rt.on_rq;
 
 	util_est_dequeue(&rq->cfs, p);
 
 	for_each_sched_entity(se) {
-		if (is_cgsched_task(p->sched_task_group) && p->rt.on_rq) {
+		if (is_cgsched) {
 			unsigned int nr = dequeue_cgsched(p, cpu_of(rq));
 			/* Don't dequeue parent if it has other entities besides us */
 			if (nr) {
 				se = parent_entity(se);
 				break;
 			}
+			is_cgsched = false;
 		} else {
 			cfs_rq = cfs_rq_of(se);
 			dequeue_entity(cfs_rq, se, flags);
@@ -5856,8 +5864,8 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 					set_next_buddy(se);
 				break;
 			}
-			flags |= DEQUEUE_SLEEP;
 		}
+		flags |= DEQUEUE_SLEEP;
 	}
 
 	for_each_sched_entity(se) {
@@ -7255,6 +7263,13 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (unlikely(se == pse))
 		return;
 
+	/* Do not interrupt cgsched tasks */
+	if (curr->policy == SCHED_CGSCHED_RR)
+		return;
+
+	if (p->policy == SCHED_CGSCHED_RR)
+		goto preempt;
+
 	/*
 	 * This is possible from callers such as attach_tasks(), in which we
 	 * unconditionally check_preempt_curr() after an enqueue (which may have
@@ -7380,7 +7395,6 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct sched_entity *se;
 	struct task_struct *p;
 	int new_tasks;
-	bool is_cgsched = false;
 
 again:
 	if (!sched_fair_runnable(rq))
@@ -7433,7 +7447,6 @@ again:
 		if (entity_is_cgsched(se)) {
 			p = _pick_next_task_rt(se->cgsched_rq);
 			se = &p->se;
-			is_cgsched = true;
 			goto cgsched;
 		}
 
@@ -7553,8 +7566,8 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 {
 	struct sched_entity *se = &prev->se;
 	struct cfs_rq *cfs_rq;
+	bool is_cgsched = is_cgsched_task(prev);
 	struct task_group *tg = prev->sched_task_group;
-	bool is_cgsched = is_cgsched_task(tg);
 
 	for_each_sched_entity(se) {
 		if (is_cgsched) {
@@ -11459,7 +11472,7 @@ static void set_next_task_cgsched(struct rq *rq, struct rt_rq *rt,
 static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 {
 	struct sched_entity *se = &p->se;
-	bool is_cgsched = is_cgsched_task(p->sched_task_group);
+	bool is_cgsched = is_cgsched_task(p);
 	struct task_group *tg = p->sched_task_group;
 
 #ifdef CONFIG_SMP

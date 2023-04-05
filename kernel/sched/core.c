@@ -9848,7 +9848,7 @@ void sched_move_task(struct task_struct *tsk)
 	task_rq_unlock(rq, tsk, &rf);
 }
 
-inline struct task_group *css_tg(struct cgroup_subsys_state *css)
+static inline struct task_group *css_tg(struct cgroup_subsys_state *css)
 {
 	return css ? container_of(css, struct task_group, css) : NULL;
 }
@@ -10725,13 +10725,18 @@ static ssize_t cpu_max_write(struct kernfs_open_file *of,
 
 static int cgsched_show(struct seq_file *s, void *v)
 {
-	int policy = css_tg(seq_css(s))->cgsched_policy;
+	struct css_task_iter it;
+	struct task_struct *task;
 
-	switch (policy) {
-	case SCHED_RR:
+	css_task_iter_start(seq_css(s), CSS_TASK_ITER_THREADED, &it);
+	task = css_task_iter_next(&it);
+	css_task_iter_end(&it);
+
+	switch (task->policy) {
+	case SCHED_CGSCHED_RR:
 		seq_printf(s, "Round Robin\n");
 		break;
-	case SCHED_FIFO:
+	case SCHED_CGSCHED_FIFO:
 		seq_printf(s, "FIFO\n");
 		break;
 	default:
@@ -10743,7 +10748,6 @@ static int cgsched_show(struct seq_file *s, void *v)
 static inline void setup_cgsched_tg(struct task_group *tg, unsigned policy) {
 	int i;
 
-	tg->cgsched_policy = policy;
 	for_each_possible_cpu (i) {
 		struct sched_entity *se = tg->se[i];
 		se->cgsched_rq = tg->rt_rq[i];
@@ -10762,15 +10766,14 @@ static ssize_t cgsched_write(struct kernfs_open_file *of, char *buf,
 	unsigned int policy;
 
 	if (!strncmp(buf, "rr", nbytes - 1))
-		policy = SCHED_RR;
+		policy = SCHED_CGSCHED_RR;
 	else if (!strncmp(buf, "fifo", nbytes - 1))
-		policy = SCHED_FIFO;
+		policy = SCHED_CGSCHED_FIFO;
 	else
 		return -EINVAL;
 
 	css_task_iter_start(css, CSS_TASK_ITER_THREADED, &it);
 	while ((task = css_task_iter_next(&it))) {
-		// TODO(hattori): change scheduling class
 		if (tg)
 			BUG_ON(tg != task->sched_task_group);
 		else {
@@ -10778,6 +10781,7 @@ static ssize_t cgsched_write(struct kernfs_open_file *of, char *buf,
 			setup_cgsched_tg(tg, policy);
 		}
 		sched_move_task(task);
+		task->policy = policy;
 	}
 	css_task_iter_end(&it);
 
