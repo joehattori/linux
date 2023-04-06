@@ -5703,24 +5703,23 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		if (is_cgsched) {
 			enqueue_cgsched(p, cpu_of(rq), flags);
 			is_cgsched = false;
-		} else {
-			if (se->on_rq)
-				break;
-			cfs_rq = cfs_rq_of(se);
-			enqueue_entity(cfs_rq, se, flags);
-
-			cfs_rq->h_nr_running++;
-			cfs_rq->idle_h_nr_running += idle_h_nr_running;
-
-			if (cfs_rq_is_idle(cfs_rq))
-				idle_h_nr_running = 1;
-
-			/* end evaluation on encountering a throttled cfs_rq */
-			if (cfs_rq_throttled(cfs_rq))
-				goto enqueue_throttle;
-
-			flags = ENQUEUE_WAKEUP;
 		}
+		if (se->on_rq)
+			break;
+		cfs_rq = cfs_rq_of(se);
+		enqueue_entity(cfs_rq, se, flags);
+
+		cfs_rq->h_nr_running++;
+		cfs_rq->idle_h_nr_running += idle_h_nr_running;
+
+		if (cfs_rq_is_idle(cfs_rq))
+			idle_h_nr_running = 1;
+
+		/* end evaluation on encountering a throttled cfs_rq */
+		if (cfs_rq_throttled(cfs_rq))
+			goto enqueue_throttle;
+
+		flags = ENQUEUE_WAKEUP;
 	}
 
 	for_each_sched_entity(se) {
@@ -5791,7 +5790,7 @@ enqueue_throttle:
 
 static void set_next_buddy(struct sched_entity *se);
 
-static unsigned int dequeue_cgsched(struct task_struct *p, int cpu)
+static void dequeue_cgsched(struct task_struct *p, int cpu)
 {
 	struct sched_rt_entity *rt_se = &p->rt;
 	struct task_group *tg = p->sched_task_group;
@@ -5809,7 +5808,6 @@ static unsigned int dequeue_cgsched(struct task_struct *p, int cpu)
 		rt_se->on_list = 0;
 	}
 	// dec_rt_tasks(rt_se, rt_rq);
-	return cgsched_rq->rt_nr_running;
 }
 
 /*
@@ -5830,40 +5828,33 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 	for_each_sched_entity(se) {
 		if (is_cgsched) {
-			unsigned int nr = dequeue_cgsched(p, cpu_of(rq));
-			/* Don't dequeue parent if it has other entities besides us */
-			if (nr) {
-				se = parent_entity(se);
-				break;
-			}
+			dequeue_cgsched(p, cpu_of(rq));
 			is_cgsched = false;
-		} else {
-			cfs_rq = cfs_rq_of(se);
-			dequeue_entity(cfs_rq, se, flags);
+		}
+		cfs_rq = cfs_rq_of(se);
+		dequeue_entity(cfs_rq, se, flags);
 
-			cfs_rq->h_nr_running--;
-			cfs_rq->idle_h_nr_running -= idle_h_nr_running;
+		cfs_rq->h_nr_running--;
+		cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 
-			if (cfs_rq_is_idle(cfs_rq))
-				idle_h_nr_running = 1;
+		if (cfs_rq_is_idle(cfs_rq))
+			idle_h_nr_running = 1;
 
-			/* end evaluation on encountering a throttled cfs_rq */
-			if (cfs_rq_throttled(cfs_rq))
-				goto dequeue_throttle;
+		/* end evaluation on encountering a throttled cfs_rq */
+		if (cfs_rq_throttled(cfs_rq))
+			goto dequeue_throttle;
 
-			/* Don't dequeue parent if it has other entities besides us */
-			if (cfs_rq->load.weight) {
-				/* Avoid re-evaluating load for this entity: */
-				se = parent_entity(se);
-				/*
-			 	* Bias pick_next to pick a task from this cfs_rq, as
-			 	* p is sleeping when it is within its sched_slice.
-			 	*/
-				if (task_sleep && se &&
-				    !throttled_hierarchy(cfs_rq))
-					set_next_buddy(se);
-				break;
-			}
+		/* Don't dequeue parent if it has other entities besides us */
+		if (cfs_rq->load.weight) {
+			/* Avoid re-evaluating load for this entity: */
+			se = parent_entity(se);
+			/*
+			 * Bias pick_next to pick a task from this cfs_rq, as
+			 * p is sleeping when it is within its sched_slice.
+			 */
+			if (task_sleep && se && !throttled_hierarchy(cfs_rq))
+				set_next_buddy(se);
+			break;
 		}
 		flags |= DEQUEUE_SLEEP;
 	}
@@ -5884,6 +5875,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		/* end evaluation on encountering a throttled cfs_rq */
 		if (cfs_rq_throttled(cfs_rq))
 			goto dequeue_throttle;
+
 	}
 
 	/* At this point se is NULL and we are at root level*/
@@ -7264,10 +7256,10 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	/* Do not interrupt cgsched tasks */
-	if (curr->policy == SCHED_CGSCHED_RR)
+	if (is_cgsched_task(curr))
 		return;
 
-	if (p->policy == SCHED_CGSCHED_RR)
+	if (is_cgsched_task(p))
 		goto preempt;
 
 	/*
@@ -7381,6 +7373,9 @@ again:
 		}
 
 		se = pick_next_entity(cfs_rq, curr);
+		if (entity_is_cgsched(se)) {
+			return _pick_next_task_rt(se->cgsched_rq);
+		}
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
@@ -7449,7 +7444,6 @@ again:
 			se = &p->se;
 			goto cgsched;
 		}
-
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
@@ -7491,12 +7485,12 @@ simple:
 
 	do {
 		se = pick_next_entity(cfs_rq, NULL);
-		set_next_entity(cfs_rq, se);
 		if (entity_is_cgsched(se)) {
 			p = _pick_next_task_rt(se->cgsched_rq);
 			se = &p->se;
 			goto done;
 		}
+		set_next_entity(cfs_rq, se);
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
@@ -7576,10 +7570,9 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 			BUG_ON(!cgsched_rq);
 			is_cgsched = false;
 			put_prev_task_cgsched(rq, cgsched_rq, prev);
-		} else {
-			cfs_rq = cfs_rq_of(se);
-			put_prev_entity(cfs_rq, se);
 		}
+		cfs_rq = cfs_rq_of(se);
+		put_prev_entity(cfs_rq, se);
 	}
 }
 
@@ -11486,19 +11479,19 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 #endif
 
 	for_each_sched_entity(se) {
+		struct cfs_rq *cfs_rq;
 		if (is_cgsched) {
 			struct rt_rq *cgsched_rq =
 				tg->se[cpu_of(rq)]->cgsched_rq;
 			BUG_ON(!cgsched_rq);
 			is_cgsched = false;
 			set_next_task_cgsched(rq, cgsched_rq, p, first);
-		} else {
-			struct cfs_rq *cfs_rq = cfs_rq_of(se);
-
-			set_next_entity(cfs_rq, se);
-			/* ensure bandwidth has been allocated on our new cfs_rq */
-			account_cfs_rq_runtime(cfs_rq, 0);
 		}
+
+		cfs_rq = cfs_rq_of(se);
+		set_next_entity(cfs_rq, se);
+		/* ensure bandwidth has been allocated on our new cfs_rq */
+		account_cfs_rq_runtime(cfs_rq, 0);
 	}
 }
 

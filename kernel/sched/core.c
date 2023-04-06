@@ -10780,8 +10780,8 @@ static ssize_t cgsched_write(struct kernfs_open_file *of, char *buf,
 			tg = task->sched_task_group;
 			setup_cgsched_tg(tg, policy);
 		}
-		sched_move_task(task);
 		task->policy = policy;
+		sched_move_task(task);
 	}
 	css_task_iter_end(&it);
 
