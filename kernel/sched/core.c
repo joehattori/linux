@@ -10732,6 +10732,9 @@ static int cgsched_show(struct seq_file *s, void *v)
 	task = css_task_iter_next(&it);
 	css_task_iter_end(&it);
 
+	if (!task)
+		return 0;
+
 	switch (task->policy) {
 	case SCHED_CGSCHED_RR:
 		seq_printf(s, "Round Robin\n");

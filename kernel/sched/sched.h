@@ -732,7 +732,7 @@ struct dl_rq {
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 /* An entity is a task if it doesn't "own" a runqueue */
-#define entity_is_task(se)	(!se->my_q)
+#define entity_is_task(se) (!se->my_q && !entity_is_cgsched(se))
 #define entity_is_cgsched(se)	(se->cgsched_policy)
 
 static inline void se_update_runnable(struct sched_entity *se)
@@ -3075,3 +3075,6 @@ static inline int has_pushable_tasks(struct rt_rq *rt)
 void enqueue_pushable_task(struct rt_rq *rt, struct task_struct *p);
 void dequeue_pushable_task(struct rt_rq *rt, struct task_struct *p);
 void update_curr_rt(struct rq *rq);
+inline void rt_queue_push_tasks(struct rq *rq);
+void enqueue_cgsched_entity(struct sched_rt_entity *rt_se, unsigned int flags);
+void dequeue_cgsched_entity(struct sched_rt_entity *rt_se);

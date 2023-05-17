@@ -360,7 +360,7 @@ static DEFINE_PER_CPU(struct callback_head, rt_pull_head);
 static void push_rt_tasks(struct rq *);
 static void pull_rt_task(struct rq *);
 
-static inline void rt_queue_push_tasks(struct rq *rq)
+inline void rt_queue_push_tasks(struct rq *rq)
 {
 	if (!has_pushable_tasks(&rq->rt))
 		return;
@@ -1350,6 +1350,23 @@ static void enqueue_rt_entity(struct sched_rt_entity *rt_se, unsigned int flags)
 	enqueue_top_rt_rq(&rq->rt);
 }
 
+void enqueue_cgsched_entity(struct sched_rt_entity *rt_se, unsigned int flags)
+{
+	struct rt_rq *cgsched_rq = rt_se->rt_rq;
+	struct rt_prio_array *array = &cgsched_rq->active;
+	struct list_head *queue = array->queue + rt_se_prio(rt_se);
+
+	WARN_ON_ONCE(rt_se->on_list);
+	if (flags & ENQUEUE_HEAD)
+		list_add(&rt_se->run_list, queue);
+	else
+		list_add_tail(&rt_se->run_list, queue);
+	__set_bit(rt_se_prio(rt_se), array->bitmap);
+	rt_se->on_list = 1;
+	rt_se->on_rq = 1;
+	inc_rt_tasks(rt_se, cgsched_rq);
+}
+
 static void dequeue_rt_entity(struct sched_rt_entity *rt_se, unsigned int flags)
 {
 	struct rq *rq = rq_of_rt_se(rt_se);
@@ -1363,6 +1380,17 @@ static void dequeue_rt_entity(struct sched_rt_entity *rt_se, unsigned int flags)
 			__enqueue_rt_entity(rt_se, flags);
 	}
 	enqueue_top_rt_rq(&rq->rt);
+}
+
+void dequeue_cgsched_entity(struct sched_rt_entity *rt_se)
+{
+	struct rt_rq *cgsched_rq = rt_se->rt_rq;
+	struct rt_prio_array *array = &cgsched_rq->active;
+
+	WARN_ON_ONCE(!rt_se->on_list);
+	__delist_rt_entity(rt_se, array);
+	rt_se->on_rq = 0;
+	dec_rt_tasks(rt_se, cgsched_rq);
 }
 
 /*

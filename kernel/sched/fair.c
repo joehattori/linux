@@ -551,7 +551,7 @@ void _print_rt_tasks(struct rt_rq *rt_rq, int i) {
 
   list_for_each_entry(rt_se, queue, run_list) {
     struct task_struct *p = container_of(rt_se, struct task_struct, rt);
-    pr_info("%sITERATING prio: %d, pid: %d (parent: %d)", prepend, bit, p->pid, p->parent->pid);
+    pr_info("%sITERATING prio: %d, pid: %d", prepend, bit, p->pid);
   }
 }
 
@@ -629,11 +629,33 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
  */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	struct sched_entity *pse = se->parent;
+	if (pse && entity_is_cgsched(pse)) {
+		struct task_struct *p = task_of(se);
+		struct sched_rt_entity *rt_se = &p->rt;
+
+		// TODO(hattori): handle priority properly.
+		int orig = p->prio;
+		p->prio = 99;
+		if (!rt_se->rt_rq)
+			rt_se->rt_rq = pse->cgsched_rq;
+		enqueue_cgsched_entity(rt_se, 0);
+		p->prio = orig;
+	}
 	rb_add_cached(&se->run_node, &cfs_rq->tasks_timeline, __entity_less);
 }
 
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	struct sched_entity *pse = se->parent;
+	if (pse && entity_is_cgsched(pse)) {
+		struct task_struct *p = task_of(se);
+
+		int orig = p->prio;
+		p->prio = 99;
+		dequeue_cgsched_entity(&p->rt);
+		p->prio = orig;
+	}
 	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
 }
 
@@ -5642,31 +5664,9 @@ static inline bool is_cgsched_task(const struct task_struct *task)
 	case SCHED_CGSCHED_RR:
 	case SCHED_CGSCHED_FIFO:
 		return true;
+	default:
+		return false;
 	}
-	return false;
-}
-
-static void enqueue_cgsched(struct task_struct *p, int cpu, int flags) {
-	struct task_group *tg = p->sched_task_group;
-	struct sched_entity *se = tg->se[cpu];
-	struct rt_rq *cgsched_rq = se->cgsched_rq;
-	struct sched_rt_entity *rt_se = &p->rt;
-	struct rt_prio_array *array = &cgsched_rq->active;
-	unsigned int prio = p->rt_priority;
-	struct list_head *queue = array->queue + prio;
-
-	WARN_ON_ONCE(rt_se->on_list);
-	if (flags & ENQUEUE_HEAD)
-		list_add(&rt_se->run_list, queue);
-	else
-		list_add_tail(&rt_se->run_list, queue);
-
-	__set_bit(prio, array->bitmap);
-	cgsched_rq->rt_nr_running++;
-	rt_se->on_list = 1;
-	rt_se->on_rq = 1;
-	rt_se->rt_rq = cgsched_rq;
-	// inc_rt_tasks(rt_se, rt_rq);
 }
 
 /*
@@ -5681,7 +5681,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct sched_entity *se = &p->se;
 	int idle_h_nr_running = task_has_idle_policy(p);
 	int task_new = !(flags & ENQUEUE_WAKEUP);
-	bool is_cgsched = is_cgsched_task(p);
 
 	/*
 	 * The code below (indirectly) updates schedutil which looks at
@@ -5699,11 +5698,8 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	if (p->in_iowait)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
-	for_each_sched_entity(se) {
-		if (is_cgsched) {
-			enqueue_cgsched(p, cpu_of(rq), flags);
-			is_cgsched = false;
-		}
+	for_each_sched_entity(se)
+	{
 		if (se->on_rq)
 			break;
 		cfs_rq = cfs_rq_of(se);
@@ -5790,26 +5786,6 @@ enqueue_throttle:
 
 static void set_next_buddy(struct sched_entity *se);
 
-static void dequeue_cgsched(struct task_struct *p, int cpu)
-{
-	struct sched_rt_entity *rt_se = &p->rt;
-	struct task_group *tg = p->sched_task_group;
-	struct sched_entity *se = tg->se[cpu];
-	struct rt_rq *cgsched_rq = se->cgsched_rq;
-	struct rt_prio_array *array = &cgsched_rq->active;
-	unsigned int prio = p->rt_priority;
-
-	rt_se->on_rq = 0;
-	if (rt_se->on_list) {
-		list_del_init(&rt_se->run_list);
-		if (list_empty(array->queue + prio))
-			__clear_bit(prio, array->bitmap);
-		cgsched_rq->rt_nr_running--;
-		rt_se->on_list = 0;
-	}
-	// dec_rt_tasks(rt_se, rt_rq);
-}
-
 /*
  * The dequeue_task method is called before nr_running is
  * decreased. We remove the task from the rbtree and
@@ -5822,15 +5798,11 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int task_sleep = flags & DEQUEUE_SLEEP;
 	int idle_h_nr_running = task_has_idle_policy(p);
 	bool was_sched_idle = sched_idle_rq(rq);
-	bool is_cgsched = is_cgsched_task(p) && p->rt.on_rq;
 
 	util_est_dequeue(&rq->cfs, p);
 
-	for_each_sched_entity(se) {
-		if (is_cgsched) {
-			dequeue_cgsched(p, cpu_of(rq));
-			is_cgsched = false;
-		}
+	for_each_sched_entity(se)
+	{
 		cfs_rq = cfs_rq_of(se);
 		dequeue_entity(cfs_rq, se, flags);
 
@@ -7256,11 +7228,11 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	/* Do not interrupt cgsched tasks */
-	if (is_cgsched_task(curr))
-		return;
+	// if (is_cgsched_task(curr))
+	// 	return;
 
-	if (is_cgsched_task(p))
-		goto preempt;
+	// if (is_cgsched_task(p))
+	// 	goto preempt;
 
 	/*
 	 * This is possible from callers such as attach_tasks(), in which we
@@ -7383,8 +7355,8 @@ again:
 }
 #endif
 
-struct task_struct *
-pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+struct task_struct *pick_next_task_fair(struct rq *rq, struct task_struct *prev,
+					struct rq_flags *rf)
 {
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
@@ -7440,6 +7412,9 @@ again:
 
 		se = pick_next_entity(cfs_rq, curr);
 		if (entity_is_cgsched(se)) {
+			if (!se->cgsched_rq->rt_nr_running) {
+				pr_info("WTF picking from zero (fair.c)");
+			}
 			p = _pick_next_task_rt(se->cgsched_rq);
 			se = &p->se;
 			goto cgsched;
@@ -7544,15 +7519,6 @@ static struct task_struct *__pick_next_task_fair(struct rq *rq)
 	return pick_next_task_fair(rq, NULL, NULL);
 }
 
-static void put_prev_task_cgsched(struct rq *rq, struct rt_rq *rt,
-				  struct task_struct *prev)
-{
-	update_curr_rt(rq);
-	update_rt_rq_load_avg(rq_clock_pelt(rq), rq, 1);
-	if (prev->rt.on_rq && prev->nr_cpus_allowed > 1)
-		enqueue_pushable_task(rt, prev);
-}
-
 /*
  * Account for a descheduled task:
  */
@@ -7560,17 +7526,8 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 {
 	struct sched_entity *se = &prev->se;
 	struct cfs_rq *cfs_rq;
-	bool is_cgsched = is_cgsched_task(prev);
-	struct task_group *tg = prev->sched_task_group;
 
 	for_each_sched_entity(se) {
-		if (is_cgsched) {
-			struct rt_rq *cgsched_rq =
-				tg->se[cpu_of(rq)]->cgsched_rq;
-			BUG_ON(!cgsched_rq);
-			is_cgsched = false;
-			put_prev_task_cgsched(rq, cgsched_rq, prev);
-		}
 		cfs_rq = cfs_rq_of(se);
 		put_prev_entity(cfs_rq, se);
 	}
@@ -11435,28 +11392,6 @@ static void switched_to_fair(struct rq *rq, struct task_struct *p)
 	}
 }
 
-static void set_next_task_cgsched(struct rq *rq, struct rt_rq *rt,
-				  struct task_struct *p, bool first)
-{
-	p->se.exec_start = rq_clock_task(rq);
-
-	/* The running task is never eligible for pushing */
-	dequeue_pushable_task(rt, p);
-
-	if (!first)
-		return;
-
-	/*
-	 * If prev task was rt, put_prev_task() has already updated the
-	 * utilization. We only care of the case where we start to schedule a
-	 * rt task
-	 */
-	if (rq->curr->sched_class != &rt_sched_class)
-		update_rt_rq_load_avg(rq_clock_pelt(rq), rq, 0);
-
-	// rt_queue_push_tasks(rq);
-}
-
 /* Account for a task changing its policy or group.
  *
  * This routine is mostly called to set cfs_rq->curr field when a task
@@ -11465,8 +11400,6 @@ static void set_next_task_cgsched(struct rq *rq, struct rt_rq *rt,
 static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 {
 	struct sched_entity *se = &p->se;
-	bool is_cgsched = is_cgsched_task(p);
-	struct task_group *tg = p->sched_task_group;
 
 #ifdef CONFIG_SMP
 	if (task_on_rq_queued(p)) {
@@ -11479,16 +11412,8 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 #endif
 
 	for_each_sched_entity(se) {
-		struct cfs_rq *cfs_rq;
-		if (is_cgsched) {
-			struct rt_rq *cgsched_rq =
-				tg->se[cpu_of(rq)]->cgsched_rq;
-			BUG_ON(!cgsched_rq);
-			is_cgsched = false;
-			set_next_task_cgsched(rq, cgsched_rq, p, first);
-		}
+		struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
-		cfs_rq = cfs_rq_of(se);
 		set_next_entity(cfs_rq, se);
 		/* ensure bandwidth has been allocated on our new cfs_rq */
 		account_cfs_rq_runtime(cfs_rq, 0);

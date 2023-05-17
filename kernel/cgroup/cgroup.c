@@ -2768,6 +2768,7 @@ int cgroup_attach_task(struct cgroup *dst_cgrp, struct task_struct *leader,
 	rcu_read_lock();
 	task = leader;
 	do {
+		// TODO(hattorij): assign proper task policy (handle when the task is migrated from cgsched)
 		cgroup_migrate_add_src(task_css_set(task), dst_cgrp, &mgctx);
 		if (!threadgroup)
 			break;

@@ -1,3 +1,4 @@
+set -eu
 # qemu-system-x86_64 \
 kvm \
   -kernel arch/x86_64/boot/bzImage \
@@ -6,5 +7,6 @@ kvm \
   -nographic \
   -no-reboot \
   -enable-kvm \
+  -smp $1 \
   -s \
-  -m 512
+  -m 1024M
