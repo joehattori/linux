@@ -9713,6 +9713,9 @@ static void sched_free_group(struct task_group *tg)
 	free_fair_sched_group(tg);
 	free_rt_sched_group(tg);
 	autogroup_free(tg);
+#ifdef CONFIG_CGSCHED
+	free_cgsched(tg);
+#endif
 	kmem_cache_free(task_group_cache, tg);
 }
 
@@ -10518,6 +10521,71 @@ static int cpu_idle_write_s64(struct cgroup_subsys_state *css,
 }
 #endif
 
+#ifdef CONFIG_CGSCHED
+static int cgsched_policy_show(struct seq_file *s, void *v)
+{
+	struct task_group *tg = css_tg(seq_css(s));
+	struct sched_entity *se = tg->se[0];
+
+	switch (se->cgsched_policy) {
+	case 0:
+		seq_printf(s, "cgroup scheduling policy is not set\n");
+		break;
+	case SCHED_CGSCHED_RR:
+		seq_printf(s, "Round Robin\n");
+		break;
+	case SCHED_CGSCHED_FIFO:
+		seq_printf(s, "FIFO\n");
+		break;
+	default:
+		seq_printf(s, "Invalid cgsched policy\n");
+	}
+	return 0;
+}
+
+static inline void setup_cgsched_tg(struct task_group *tg, unsigned policy)
+{
+	int i;
+
+	for_each_possible_cpu (i) {
+		struct sched_entity *se = tg->se[i];
+		if (!se->cgsched_rq) {
+			se->cgsched_rq =
+				kzalloc_node(sizeof(struct rt_rq), GFP_KERNEL,
+					     cpu_to_node(i));
+			init_rt_rq(se->cgsched_rq);
+		}
+		se->cgsched_policy = policy;
+		INIT_LIST_HEAD(&se->group_node);
+	}
+}
+
+static ssize_t cgsched_policy_write(struct kernfs_open_file *of, char *buf,
+				    size_t nbytes, loff_t off)
+{
+	struct css_task_iter it;
+	struct task_struct *task;
+	struct cgroup_subsys_state *css = seq_css(of->seq_file);
+	struct task_group *tg = css_tg(css);
+	unsigned int policy;
+
+	if (!strncmp(buf, "rr", nbytes - 1))
+		policy = SCHED_CGSCHED_RR;
+	else if (!strncmp(buf, "fifo", nbytes - 1))
+		policy = SCHED_CGSCHED_FIFO;
+	else
+		return -EINVAL;
+
+	setup_cgsched_tg(tg, policy);
+	css_task_iter_start(css, CSS_TASK_ITER_THREADED, &it);
+	while ((task = css_task_iter_next(&it)))
+		sched_move_task(task);
+	css_task_iter_end(&it);
+
+	return nbytes;
+}
+#endif
+
 static struct cftype cpu_legacy_files[] = {
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	{
@@ -10723,74 +10791,6 @@ static ssize_t cpu_max_write(struct kernfs_open_file *of,
 }
 #endif
 
-static int cgsched_show(struct seq_file *s, void *v)
-{
-	struct css_task_iter it;
-	struct task_struct *task;
-
-	css_task_iter_start(seq_css(s), CSS_TASK_ITER_THREADED, &it);
-	task = css_task_iter_next(&it);
-	css_task_iter_end(&it);
-
-	if (!task)
-		return 0;
-
-	switch (task->policy) {
-	case SCHED_CGSCHED_RR:
-		seq_printf(s, "Round Robin\n");
-		break;
-	case SCHED_CGSCHED_FIFO:
-		seq_printf(s, "FIFO\n");
-		break;
-	default:
-		seq_printf(s, "cgroup scheduling policy is not set\n");
-	}
-	return 0;
-}
-
-static inline void setup_cgsched_tg(struct task_group *tg, unsigned policy) {
-	int i;
-
-	for_each_possible_cpu (i) {
-		struct sched_entity *se = tg->se[i];
-		se->cgsched_rq = tg->rt_rq[i];
-		se->cgsched_policy = policy;
-		INIT_LIST_HEAD(&se->group_node);
-	}
-}
-
-static ssize_t cgsched_write(struct kernfs_open_file *of, char *buf,
-				  size_t nbytes, loff_t off)
-{
-	struct css_task_iter it;
-	struct task_struct *task;
-	struct cgroup_subsys_state *css = seq_css(of->seq_file);
-	struct task_group *tg = NULL;
-	unsigned int policy;
-
-	if (!strncmp(buf, "rr", nbytes - 1))
-		policy = SCHED_CGSCHED_RR;
-	else if (!strncmp(buf, "fifo", nbytes - 1))
-		policy = SCHED_CGSCHED_FIFO;
-	else
-		return -EINVAL;
-
-	css_task_iter_start(css, CSS_TASK_ITER_THREADED, &it);
-	while ((task = css_task_iter_next(&it))) {
-		if (tg)
-			BUG_ON(tg != task->sched_task_group);
-		else {
-			tg = task->sched_task_group;
-			setup_cgsched_tg(tg, policy);
-		}
-		task->policy = policy;
-		sched_move_task(task);
-	}
-	css_task_iter_end(&it);
-
-	return nbytes;
-}
-
 static struct cftype cpu_files[] = {
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	{
@@ -10840,12 +10840,13 @@ static struct cftype cpu_files[] = {
 		.write = cpu_uclamp_max_write,
 	},
 #endif
+#ifdef CONFIG_CGSCHED
 	{
 		.name = "policy",
-		.flags = CFTYPE_NOT_ON_ROOT,
-		.seq_show = cgsched_show,
-		.write = cgsched_write,
+		.seq_show = cgsched_policy_show,
+		.write = cgsched_policy_write,
 	},
+#endif
 	{ }	/* terminate */
 };
 

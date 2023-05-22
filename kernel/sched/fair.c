@@ -536,57 +536,94 @@ static inline bool entity_before(struct sched_entity *a,
 #define __node_2_se(node) \
 	rb_entry((node), struct sched_entity, run_node)
 
-void _print_rt_tasks(struct rt_rq *rt_rq, int i) {
-  char *prepend;
-  unsigned int bit = sched_find_first_bit(rt_rq->active.bitmap);
-  struct list_head *queue = rt_rq->active.queue + bit;
-  struct sched_rt_entity *rt_se;
+#ifdef CONFIG_CGSCHED
+int _print_rt_tasks(struct rt_rq *rt_rq, int i)
+{
+	char *prepend;
+	struct sched_rt_entity *rt_se;
+	struct list_head *queue;
+	unsigned int bit = sched_find_first_bit(rt_rq->active.bitmap);
+	int count = 0;
 
-  if (i==1)
-    prepend = "  ";
-  else if (i==2)
-    prepend = "    ";
-  else if (i==3)
-    prepend = "      ";
+	if (bit >= MAX_RT_PRIO)
+		return count;
+	queue = rt_rq->active.queue + bit;
 
-  list_for_each_entry(rt_se, queue, run_list) {
-    struct task_struct *p = container_of(rt_se, struct task_struct, rt);
-    pr_info("%sITERATING prio: %d, pid: %d", prepend, bit, p->pid);
-  }
+	if (i == 1)
+		prepend = "  ";
+	else if (i == 2)
+		prepend = "    ";
+	else if (i == 3)
+		prepend = "      ";
+
+	list_for_each_entry (rt_se, queue, run_list) {
+		if (i) {
+			struct task_struct *p =
+				container_of(rt_se, struct task_struct, rt);
+			pr_info("%sITERATING prio: %d, pid: %d", prepend, bit,
+				p->pid);
+		}
+		count++;
+	}
+	return count;
 }
 
-void _print_tasks(struct cfs_rq *cfs, int i) {
-  struct rb_root *root = &cfs->tasks_timeline.rb_root;
-  struct rb_node *node;
-  char *prepend;
-
-  if (i==1)
-    prepend = "  ";
-  else if (i==2)
-    prepend = "    ";
-  else if (i==3)
-    prepend = "      ";
-
-  for (node = rb_first(root); node; node = rb_next(node)) {
-    struct sched_entity *se = __node_2_se(node);
-
-    if (se->cgsched_rq) {
-      pr_info("%sITERATING cfs %lx cgsched %lx", prepend, (unsigned long)cfs, (unsigned long)se);
-      _print_rt_tasks(se->cgsched_rq, i + 1);
-    } else if (entity_is_task(se)) {
-      struct task_struct *p = task_of(se);
-      pr_info("%sITERATING cfs %lx pid: %d (parent: %d)", prepend, (unsigned long)cfs, p->pid, p->parent->pid);
-    } else {
-      pr_info("%sITERATING cfs %lx tg", prepend, (unsigned long)cfs);
-      _print_tasks(se->my_q, i + 1);
-    }
-  }
+void _print_tasks(struct cfs_rq *cfs, int i);
+void _print_se(struct cfs_rq *cfs, char *prepend, struct sched_entity *se,
+	       int i)
+{
+	if (entity_is_cgsched(se)) {
+		pr_info("%sITERATING cgsched %lx cfs %lx se: %lx my_q: %lx",
+			prepend, (unsigned long)cfs, (unsigned long)se,
+			(unsigned long)se->cgsched_rq, (unsigned long)se->my_q);
+		_print_tasks(se->my_q, i + 1);
+		pr_info("%snow iterating cgsched rt queue (cfs count: %d, rt count: %d)",
+			prepend, se->my_q->nr_running,
+			se->cgsched_rq->rt_nr_running);
+		_print_rt_tasks(se->cgsched_rq, i + 1);
+	} else if (entity_is_task(se)) {
+		struct task_struct *p = task_of(se);
+		pr_info("%sITERATING single cfs %lx se: %lx pid: %d (parent: %d)",
+			prepend, (unsigned long)cfs, (unsigned long)se, p->pid,
+			p->parent->pid);
+	} else {
+		pr_info("%sITERATING tg cfs %lx se: %lx tg", prepend,
+			(unsigned long)cfs, (unsigned long)se);
+		_print_tasks(se->my_q, i + 1);
+	}
 }
 
-void print_tasks(struct cfs_rq *cfs) {
-  _print_tasks(cfs, 1);
-  pr_info("printed %d tasks", cfs->nr_running);
+void _print_tasks(struct cfs_rq *cfs, int i)
+{
+	struct rb_root *root = &cfs->tasks_timeline.rb_root;
+	struct rb_node *node;
+	char *prepend;
+
+	if (i == 1)
+		prepend = "  ";
+	else if (i == 2)
+		prepend = "    ";
+	else if (i == 3)
+		prepend = "      ";
+
+	if (cfs->curr) {
+		pr_info("%sfirst, printing curr", prepend);
+		_print_se(cfs, prepend, cfs->curr, i);
+	} else {
+		pr_info("%sno curr", prepend);
+	}
+	for (node = rb_first(root); node; node = rb_next(node)) {
+		struct sched_entity *se = __node_2_se(node);
+		_print_se(cfs, prepend, se, i);
+	}
 }
+
+void print_tasks(struct cfs_rq *cfs)
+{
+	_print_tasks(cfs, 1);
+	pr_info("printed %d tasks", cfs->nr_running);
+}
+#endif
 
 static void update_min_vruntime(struct cfs_rq *cfs_rq)
 {
@@ -624,39 +661,62 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 	return entity_before(__node_2_se(a), __node_2_se(b));
 }
 
+#ifdef CONFIG_CGSCHED
+static inline bool is_cgsched_member(const struct sched_entity *se)
+{
+	const struct sched_entity *pse = se->parent;
+	return pse && entity_is_cgsched(pse);
+}
+#endif
+
 /*
  * Enqueue an entity into the rb-tree:
  */
-static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
+			     bool curr, bool do_cgsched)
 {
-	struct sched_entity *pse = se->parent;
-	if (pse && entity_is_cgsched(pse)) {
+#ifdef CONFIG_CGSCHED
+	if (do_cgsched && is_cgsched_member(se)) {
 		struct task_struct *p = task_of(se);
 		struct sched_rt_entity *rt_se = &p->rt;
-
+		struct sched_entity *pse = se->parent;
+		struct rt_rq *cgsched_rq = pse->cgsched_rq;
 		// TODO(hattori): handle priority properly.
 		int orig = p->prio;
-		p->prio = 99;
-		if (!rt_se->rt_rq)
-			rt_se->rt_rq = pse->cgsched_rq;
-		enqueue_cgsched_entity(rt_se, 0);
+
+		p->prio = CGSCHED_PRIO;
+		enqueue_cgsched_entity(rt_se, cgsched_rq, 0);
 		p->prio = orig;
+		BUG_ON(!rt_se->on_list);
 	}
-	rb_add_cached(&se->run_node, &cfs_rq->tasks_timeline, __entity_less);
+#endif
+
+	if (!curr)
+		rb_add_cached(&se->run_node, &cfs_rq->tasks_timeline,
+			      __entity_less);
 }
 
-static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
+			     bool curr, bool do_cgsched)
 {
-	struct sched_entity *pse = se->parent;
-	if (pse && entity_is_cgsched(pse)) {
+#ifdef CONFIG_CGSCHED
+	if (do_cgsched && is_cgsched_member(se)) {
 		struct task_struct *p = task_of(se);
+		struct sched_rt_entity *rt_se = &p->rt;
+		struct rt_rq *cgsched_rq = se->parent->cgsched_rq;
 
-		int orig = p->prio;
-		p->prio = 99;
-		dequeue_cgsched_entity(&p->rt);
-		p->prio = orig;
+		if (rt_se->on_rq) {
+			int orig = p->prio;
+			p->prio = CGSCHED_PRIO;
+			dequeue_cgsched_entity(rt_se, cgsched_rq);
+			p->prio = orig;
+		}
+		BUG_ON(rt_se->on_list);
 	}
-	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
+#endif
+
+	if (!curr)
+		rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
 }
 
 struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
@@ -3069,6 +3129,20 @@ account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	}
 #endif
 	cfs_rq->nr_running++;
+
+#ifdef CONFIG_CGSCHED
+	if (is_cgsched_member(se)) {
+		struct task_struct *p = task_of(se);
+		struct rt_rq *cgsched_rq = se->parent->cgsched_rq;
+		struct sched_rt_entity *rt_se = &p->rt;
+		int orig = p->prio;
+
+		p->prio = CGSCHED_PRIO;
+		account_cgsched_entity_enqueue(rt_se, cgsched_rq);
+		p->prio = orig;
+		BUG_ON(cfs_rq->nr_running != cgsched_rq->rt_nr_running);
+	}
+#endif
 }
 
 static void
@@ -3082,6 +3156,23 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	}
 #endif
 	cfs_rq->nr_running--;
+
+#ifdef CONFIG_CGSCHED
+	if (is_cgsched_member(se)) {
+		struct task_struct *p = task_of(se);
+		struct sched_rt_entity *rt_se = &p->rt;
+		struct rt_rq *cgsched_rq = se->parent->cgsched_rq;
+
+		if (rt_se->on_rq) {
+			int orig = p->prio;
+
+			p->prio = CGSCHED_PRIO;
+			account_cgsched_entity_dequeue(rt_se, cgsched_rq);
+			p->prio = orig;
+			BUG_ON(cfs_rq->nr_running != cgsched_rq->rt_nr_running);
+		}
+	}
+#endif
 }
 
 /*
@@ -4394,8 +4485,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	check_schedstat_required();
 	update_stats_enqueue(cfs_rq, se, flags);
 	check_spread(cfs_rq, se);
-	if (!curr)
-		__enqueue_entity(cfs_rq, se);
+	__enqueue_entity(cfs_rq, se, curr, true);
 	se->on_rq = 1;
 
 	/*
@@ -4480,8 +4570,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	clear_buddies(cfs_rq, se);
 
-	if (se != cfs_rq->curr)
-		__dequeue_entity(cfs_rq, se);
+	__dequeue_entity(cfs_rq, se, se == cfs_rq->curr, true);
 	se->on_rq = 0;
 	account_entity_dequeue(cfs_rq, se);
 
@@ -4562,7 +4651,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		 * runqueue.
 		 */
 		update_stats_wait_end(cfs_rq, se);
-		__dequeue_entity(cfs_rq, se);
+		__dequeue_entity(cfs_rq, se, false, false);
 		update_load_avg(cfs_rq, se, UPDATE_TG);
 	}
 
@@ -4662,7 +4751,7 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 	if (prev->on_rq) {
 		update_stats_wait_start(cfs_rq, prev);
 		/* Put 'current' back into the tree. */
-		__enqueue_entity(cfs_rq, prev);
+		__enqueue_entity(cfs_rq, prev, false, false);
 		/* in !on_rq case, update occurred at dequeue */
 		update_load_avg(cfs_rq, prev, 0);
 	}
@@ -5658,17 +5747,6 @@ static int sched_idle_cpu(int cpu)
 }
 #endif
 
-static inline bool is_cgsched_task(const struct task_struct *task)
-{
-	switch (task->policy) {
-	case SCHED_CGSCHED_RR:
-	case SCHED_CGSCHED_FIFO:
-		return true;
-	default:
-		return false;
-	}
-}
-
 /*
  * The enqueue_task method is called before nr_running is
  * increased. Here we update the fair scheduling stats and
@@ -5698,8 +5776,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	if (p->in_iowait)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
-	for_each_sched_entity(se)
-	{
+	for_each_sched_entity(se) {
 		if (se->on_rq)
 			break;
 		cfs_rq = cfs_rq_of(se);
@@ -5801,8 +5878,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 	util_est_dequeue(&rq->cfs, p);
 
-	for_each_sched_entity(se)
-	{
+	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 		dequeue_entity(cfs_rq, se, flags);
 
@@ -7227,13 +7303,6 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (unlikely(se == pse))
 		return;
 
-	/* Do not interrupt cgsched tasks */
-	// if (is_cgsched_task(curr))
-	// 	return;
-
-	// if (is_cgsched_task(p))
-	// 	goto preempt;
-
 	/*
 	 * This is possible from callers such as attach_tasks(), in which we
 	 * unconditionally check_preempt_curr() after an enqueue (which may have
@@ -7242,6 +7311,12 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	 */
 	if (unlikely(throttled_hierarchy(cfs_rq_of(pse))))
 		return;
+
+	if (is_cgsched_member(se))
+		return;
+
+	if (is_cgsched_member(pse))
+		goto preempt;
 
 	if (sched_feat(NEXT_BUDDY) && scale && !(wake_flags & WF_FORK)) {
 		set_next_buddy(pse);
@@ -7345,9 +7420,11 @@ again:
 		}
 
 		se = pick_next_entity(cfs_rq, curr);
+#ifdef CONFIG_CGSCHED
 		if (entity_is_cgsched(se)) {
-			return _pick_next_task_rt(se->cgsched_rq);
+			return pick_next_task_cgsched(se->cgsched_rq);
 		}
+#endif
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
@@ -7355,8 +7432,8 @@ again:
 }
 #endif
 
-struct task_struct *pick_next_task_fair(struct rq *rq, struct task_struct *prev,
-					struct rq_flags *rf)
+struct task_struct *
+pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
@@ -7411,20 +7488,21 @@ again:
 		}
 
 		se = pick_next_entity(cfs_rq, curr);
+#ifdef CONFIG_CGSCHED
 		if (entity_is_cgsched(se)) {
-			if (!se->cgsched_rq->rt_nr_running) {
-				pr_info("WTF picking from zero (fair.c)");
-			}
-			p = _pick_next_task_rt(se->cgsched_rq);
+			p = pick_next_task_cgsched(se->cgsched_rq);
 			se = &p->se;
 			goto cgsched;
 		}
+#endif
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
 	p = task_of(se);
 
+#ifdef CONFIG_CGSCHED
 cgsched:
+#endif
 
 	/*
 	 * Since we haven't yet done put_prev_entity and if the selected task
@@ -7460,11 +7538,13 @@ simple:
 
 	do {
 		se = pick_next_entity(cfs_rq, NULL);
-		if (entity_is_cgsched(se)) {
-			p = _pick_next_task_rt(se->cgsched_rq);
-			se = &p->se;
-			goto done;
-		}
+#ifdef CONFIG_CGSCHED
+		// if (entity_is_cgsched(se)) {
+		// 	p = pick_next_task_cgsched(se->cgsched_rq);
+		// 	se = &p->se;
+		// 	goto done;
+		// }
+#endif
 		set_next_entity(cfs_rq, se);
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);

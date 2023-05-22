@@ -437,6 +437,7 @@ struct task_group {
 	/* Effective clamp values used for a task group */
 	struct uclamp_se	uclamp[UCLAMP_CNT];
 #endif
+
 };
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -486,6 +487,9 @@ extern void start_cfs_bandwidth(struct cfs_bandwidth *cfs_b);
 extern void unthrottle_cfs_rq(struct cfs_rq *cfs_rq);
 
 extern void free_rt_sched_group(struct task_group *tg);
+#ifdef CONFIG_CGSCHED
+extern void free_cgsched(struct task_group *tg);
+#endif
 extern int alloc_rt_sched_group(struct task_group *tg, struct task_group *parent);
 extern void init_tg_rt_entry(struct task_group *tg, struct rt_rq *rt_rq,
 		struct sched_rt_entity *rt_se, int cpu,
@@ -732,8 +736,10 @@ struct dl_rq {
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 /* An entity is a task if it doesn't "own" a runqueue */
-#define entity_is_task(se) (!se->my_q && !entity_is_cgsched(se))
-#define entity_is_cgsched(se)	(se->cgsched_policy)
+#define entity_is_task(se) (!se->my_q)
+#ifdef CONFIG_CGSCHED
+#define entity_is_cgsched(se) (se->cgsched_rq)
+#endif
 
 static inline void se_update_runnable(struct sched_entity *se)
 {
@@ -3064,17 +3070,19 @@ extern int sched_dynamic_mode(const char *str);
 extern void sched_dynamic_update(int mode);
 #endif
 
-extern struct task_struct *_pick_next_task_rt(struct rt_rq *rt_rq);
+#define CGSCHED_PRIO 90
+#ifdef CONFIG_CGSCHED
 extern void print_tasks(struct cfs_rq *cfs);
-
-static inline int has_pushable_tasks(struct rt_rq *rt)
-{
-	return !plist_head_empty(&rt->pushable_tasks);
-}
-
-void enqueue_pushable_task(struct rt_rq *rt, struct task_struct *p);
-void dequeue_pushable_task(struct rt_rq *rt, struct task_struct *p);
-void update_curr_rt(struct rq *rq);
-inline void rt_queue_push_tasks(struct rq *rq);
-void enqueue_cgsched_entity(struct sched_rt_entity *rt_se, unsigned int flags);
-void dequeue_cgsched_entity(struct sched_rt_entity *rt_se);
+extern void enqueue_cgsched_entity(struct sched_rt_entity *rt_se,
+				   struct rt_rq *cgsched_rq,
+				   unsigned int flags);
+extern void account_cgsched_entity_enqueue(struct sched_rt_entity *rt_se,
+					   struct rt_rq *cgsched_rq);
+extern void dequeue_cgsched_entity(struct sched_rt_entity *rt_se,
+				   struct rt_rq *cgsched_rq);
+extern void account_cgsched_entity_dequeue(struct sched_rt_entity *rt_se,
+					   struct rt_rq *cgsched_rq);
+extern void print_tasks(struct cfs_rq *cfs);
+extern int _print_rt_tasks(struct rt_rq *rt_rq, int i);
+extern struct task_struct *pick_next_task_cgsched(struct rt_rq *cgsched_rq);
+#endif

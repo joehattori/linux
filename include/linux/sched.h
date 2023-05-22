@@ -547,8 +547,6 @@ struct sched_entity {
 	struct cfs_rq			*cfs_rq;
 	/* rq "owned" by this entity/group: */
 	struct cfs_rq			*my_q;
-	/* rt_rq which stores cgsched entities */
-	struct rt_rq *cgsched_rq;
 	/* cached value of my_q->h_nr_running */
 	unsigned long			runnable_weight;
 #endif
@@ -562,8 +560,11 @@ struct sched_entity {
 	 */
 	struct sched_avg		avg;
 #endif
-
+#ifdef CONFIG_CGSCHED
+	/* rt_rq which stores cgsched entities */
+	struct rt_rq *cgsched_rq;
 	unsigned int cgsched_policy;
+#endif
 };
 
 struct sched_rt_entity {
