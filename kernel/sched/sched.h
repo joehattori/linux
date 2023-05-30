@@ -3085,4 +3085,5 @@ extern void account_cgsched_entity_dequeue(struct sched_rt_entity *rt_se,
 extern void print_tasks(struct cfs_rq *cfs);
 extern int _print_rt_tasks(struct rt_rq *rt_rq, int i);
 extern struct task_struct *pick_next_task_cgsched(struct rt_rq *cgsched_rq);
+extern bool task_tick_cgsched_should_keep(struct sched_rt_entity *rt_se);
 #endif

@@ -1369,6 +1369,22 @@ static void enqueue_rt_entity(struct sched_rt_entity *rt_se, unsigned int flags)
 	enqueue_top_rt_rq(&rq->rt);
 }
 
+static void dequeue_rt_entity(struct sched_rt_entity *rt_se, unsigned int flags)
+{
+	struct rq *rq = rq_of_rt_se(rt_se);
+
+	dequeue_rt_stack(rt_se, flags);
+
+	for_each_sched_rt_entity(rt_se)
+	{
+		struct rt_rq *rt_rq = group_rt_rq(rt_se);
+
+		if (rt_rq && rt_rq->rt_nr_running)
+			__enqueue_rt_entity(rt_se, flags);
+	}
+	enqueue_top_rt_rq(&rq->rt);
+}
+
 #ifdef CONFIG_CGSCHED
 void enqueue_cgsched_entity(struct sched_rt_entity *rt_se,
 			    struct rt_rq *cgsched_rq, unsigned int flags)
@@ -1377,10 +1393,10 @@ void enqueue_cgsched_entity(struct sched_rt_entity *rt_se,
 	struct list_head *queue = array->queue + rt_se_prio(rt_se);
 
 	WARN_ON_ONCE(rt_se->on_list);
-	if (flags & ENQUEUE_HEAD)
-		list_add(&rt_se->run_list, queue);
-	else
-		list_add_tail(&rt_se->run_list, queue);
+	// if (flags & ENQUEUE_HEAD)
+	// 	list_add(&rt_se->run_list, queue);
+	// else
+	list_add_tail(&rt_se->run_list, queue);
 	__set_bit(rt_se_prio(rt_se), array->bitmap);
 	rt_se->on_list = 1;
 }
@@ -1392,24 +1408,7 @@ void account_cgsched_entity_enqueue(struct sched_rt_entity *rt_se,
 	inc_rt_tasks(rt_se, cgsched_rq);
 	rt_se->on_rq = 1;
 }
-#endif
 
-static void dequeue_rt_entity(struct sched_rt_entity *rt_se, unsigned int flags)
-{
-	struct rq *rq = rq_of_rt_se(rt_se);
-
-	dequeue_rt_stack(rt_se, flags);
-
-	for_each_sched_rt_entity(rt_se) {
-		struct rt_rq *rt_rq = group_rt_rq(rt_se);
-
-		if (rt_rq && rt_rq->rt_nr_running)
-			__enqueue_rt_entity(rt_se, flags);
-	}
-	enqueue_top_rt_rq(&rq->rt);
-}
-
-#ifdef CONFIG_CGSCHED
 void dequeue_cgsched_entity(struct sched_rt_entity *rt_se,
 			    struct rt_rq *cgsched_rq)
 {
@@ -1425,6 +1424,14 @@ void account_cgsched_entity_dequeue(struct sched_rt_entity *rt_se,
 	WARN_ON_ONCE(!rt_se->on_rq);
 	dec_rt_tasks(rt_se, cgsched_rq);
 	rt_se->on_rq = 0;
+}
+
+bool task_tick_cgsched_should_keep(struct sched_rt_entity *rt_se)
+{
+	if (--rt_se->time_slice)
+		return true;
+	rt_se->time_slice = sched_rr_timeslice;
+	return false;
 }
 #endif
 

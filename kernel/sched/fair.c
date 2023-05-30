@@ -4758,8 +4758,8 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 	cfs_rq->curr = NULL;
 }
 
-static void
-entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
+static void entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr,
+			int queued, bool should_keep)
 {
 	/*
 	 * Update run-time statistics of the 'current'.
@@ -4777,7 +4777,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	 * queued ticks are scheduled to match the slice, so don't bother
 	 * validating it and just reschedule.
 	 */
-	if (queued) {
+	if (queued && !should_keep) {
 		resched_curr(rq_of(cfs_rq));
 		return;
 	}
@@ -4789,7 +4789,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 		return;
 #endif
 
-	if (cfs_rq->nr_running > 1)
+	if (cfs_rq->nr_running > 1 && !should_keep)
 		check_preempt_tick(cfs_rq, curr);
 }
 
@@ -11143,7 +11143,8 @@ __entity_slice_used(struct sched_entity *se, int min_nr_tasks)
 }
 
 #define MIN_NR_TASKS_DURING_FORCEIDLE	2
-static inline void task_tick_core(struct rq *rq, struct task_struct *curr)
+static inline void task_tick_core(struct rq *rq, struct task_struct *curr,
+				  bool should_keep)
 {
 	if (!sched_core_enabled(rq))
 		return;
@@ -11163,7 +11164,8 @@ static inline void task_tick_core(struct rq *rq, struct task_struct *curr)
 	 * if we need to give up the CPU.
 	 */
 	if (rq->core->core_forceidle && rq->cfs.nr_running == 1 &&
-	    __entity_slice_used(&curr->se, MIN_NR_TASKS_DURING_FORCEIDLE))
+	    __entity_slice_used(&curr->se, MIN_NR_TASKS_DURING_FORCEIDLE) &&
+	    !should_keep)
 		resched_curr(rq);
 }
 
@@ -11242,7 +11244,10 @@ bool cfs_prio_less(struct task_struct *a, struct task_struct *b, bool in_fi)
 	return delta > 0;
 }
 #else
-static inline void task_tick_core(struct rq *rq, struct task_struct *curr) {}
+static inline void task_tick_core(struct rq *rq, struct task_struct *curr,
+				  bool should_keep)
+{
+}
 #endif
 
 /*
@@ -11257,10 +11262,17 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &curr->se;
+	bool should_keep;
+
+	if (is_cgsched_member(se)) {
+		should_keep = task_tick_cgsched_should_keep(&curr->rt);
+	} else {
+		should_keep = false;
+	}
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
-		entity_tick(cfs_rq, se, queued);
+		entity_tick(cfs_rq, se, queued, should_keep);
 	}
 
 	if (static_branch_unlikely(&sched_numa_balancing))
@@ -11269,7 +11281,7 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 	update_misfit_status(curr, rq);
 	update_overutilized_status(task_rq(curr));
 
-	task_tick_core(rq, curr);
+	task_tick_core(rq, curr, should_keep);
 }
 
 /*
